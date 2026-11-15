@@ -28,23 +28,29 @@ export function weld(positions, indices) {
 
 /** Aristas de borde (usadas una sola vez en su sentido): son los agujeros de la malla. */
 function boundaryEdges(indices) {
-  const half = new Map(); // a*N+b -> true
-  const N = 4294967296;
-  for (let f = 0; f < indices.length; f += 3) {
+  const N = 4294967296, n = indices.length;
+  const fwd = new Float64Array(n), rev = new Float64Array(n);
+  for (let f = 0; f < n; f += 3) {
     for (let e = 0; e < 3; e++) {
       const a = indices[f + e], b = indices[f + (e + 1) % 3];
-      half.set(a * N + b, [a, b]);
+      fwd[f + e] = a * N + b;
+      rev[f + e] = b * N + a;
     }
   }
+  const sf = Float64Array.from(fwd).sort(), sr = rev.sort();
   const open = [];
-  for (const [key, [a, b]] of half) {
-    if (!half.has(b * N + a)) open.push([a, b]);
+  let j = 0;
+  for (let i = 0; i < n; i++) {
+    const k = sf[i];
+    while (j < n && sr[j] < k) j++;
+    if (j >= n || sr[j] !== k) open.push([Math.floor(k / N), k % N]);
   }
   return open;
 }
 
 /** Tapa los agujeros (abanico desde el centro de cada contorno). Devuelve true si queda estanca. */
 export function fillHoles(positions, indices, maxLoop = 5000) {
+  if (!boundaryEdges(indices).length) return { positions, indices, watertight: true };
   let pos = Array.from(positions);
   let idx = Array.from(indices);
   for (let pass = 0; pass < 3; pass++) {
@@ -96,12 +102,74 @@ export function signedVolume(p, idx) {
   return v;
 }
 
+/** Quita los trozos sueltos pequeños (restos flotantes de la IA) y los vértices que ya no se usan. */
+export function dropSmallParts(positions, indices, minFraction = 0.02) {
+  const nv = positions.length / 3, nf = indices.length / 3;
+  const parent = new Int32Array(nv).map((_, i) => i);
+  const find = (x) => { while (parent[x] !== x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; };
+  for (let f = 0; f < indices.length; f += 3) {
+    const a = find(indices[f]), b = find(indices[f + 1]), c = find(indices[f + 2]);
+    parent[b] = a; parent[find(c)] = find(a);
+  }
+  const count = new Map();
+  for (let f = 0; f < indices.length; f += 3) {
+    const r = find(indices[f]);
+    count.set(r, (count.get(r) || 0) + 1);
+  }
+  const min = nf * minFraction;
+  const keep = [];
+  for (let f = 0; f < indices.length; f += 3) if (count.get(find(indices[f])) >= min) keep.push(indices[f], indices[f + 1], indices[f + 2]);
+  // compactar vértices
+  const remap = new Int32Array(nv).fill(-1);
+  const out = [];
+  const idx = new Uint32Array(keep.length);
+  for (let i = 0; i < keep.length; i++) {
+    const v = keep[i];
+    if (remap[v] < 0) { remap[v] = out.length / 3; out.push(positions[3 * v], positions[3 * v + 1], positions[3 * v + 2]); }
+    idx[i] = remap[v];
+  }
+  return { positions: Float32Array.from(out), indices: idx };
+}
+
+/** Suavizado de Taubin: quita los escalones del marching cubes sin encoger el modelo. */
+export function taubinSmooth(positions, indices, iterations = 8, lambda = 0.5, mu = -0.53) {
+  if (!iterations) return positions;
+  const nv = positions.length / 3;
+  const start = new Uint32Array(nv + 1);
+  for (let i = 0; i < indices.length; i++) start[indices[i] + 1] += 2;
+  for (let i = 0; i < nv; i++) start[i + 1] += start[i];
+  const adj = new Uint32Array(start[nv]), fill = start.slice(0, nv);
+  for (let f = 0; f < indices.length; f += 3) {
+    for (let e = 0; e < 3; e++) {
+      const a = indices[f + e], b = indices[f + (e + 1) % 3], c = indices[f + (e + 2) % 3];
+      adj[fill[a]++] = b; adj[fill[a]++] = c;
+    }
+  }
+  let p = Float32Array.from(positions), q = new Float32Array(p.length);
+  for (let it = 0; it < iterations * 2; it++) {
+    const w = it % 2 === 0 ? lambda : mu;
+    for (let i = 0; i < nv; i++) {
+      const s = start[i], e = start[i + 1], n = e - s;
+      if (!n) { q[3 * i] = p[3 * i]; q[3 * i + 1] = p[3 * i + 1]; q[3 * i + 2] = p[3 * i + 2]; continue; }
+      let x = 0, y = 0, z = 0;
+      for (let k = s; k < e; k++) { const j = 3 * adj[k]; x += p[j]; y += p[j + 1]; z += p[j + 2]; }
+      q[3 * i] = p[3 * i] + w * (x / n - p[3 * i]);
+      q[3 * i + 1] = p[3 * i + 1] + w * (y / n - p[3 * i + 1]);
+      q[3 * i + 2] = p[3 * i + 2] + w * (z / n - p[3 * i + 2]);
+    }
+    [p, q] = [q, p];
+  }
+  return p;
+}
+
 /**
  * Pasos de prepare_for_print: une vértices, tapa agujeros, orienta (Z arriba, desde glTF Y arriba),
  * escala a la altura pedida, centra en X/Y y apoya en Z=0.
  */
-export function prepareForPrint(positions, indices, heightMm) {
+export function prepareForPrint(positions, indices, heightMm, smooth = 8) {
   let m = weld(positions, indices);
+  m = dropSmallParts(m.positions, m.indices);
+  m.positions = taubinSmooth(m.positions, m.indices, smooth);
   m = fillHoles(m.positions, m.indices);
   const p = m.positions;
   // glTF usa Y arriba; las impresoras Z arriba: (x, y, z) -> (x, -z, y)

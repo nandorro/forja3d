@@ -3,7 +3,11 @@
 
 export class QuotaExceeded extends Error {}
 
-const HF_SPACE = "https://tencent-hunyuan3d-2.hf.space";
+// Hunyuan3D-2.1 da mallas bastante más limpias que la 2.0; la 2.0 queda de reserva si la 2.1 falla.
+const SPACES = {
+  hy21: { name: "Hunyuan3D-2.1", host: "https://tencent-hunyuan3d-2-1.hf.space", fn: 2, head: [null] },
+  hy2: { name: "Hunyuan3D-2", host: "https://tencent-hunyuan3d-2.hf.space", fn: 5, head: [""] },
+};
 const MESHY_API = "https://api.meshy.ai/openapi/v1";
 
 const store = {
@@ -56,10 +60,11 @@ async function readSse(response, onEvent) {
   }
 }
 
-async function runHunyuan(blob, opts, progress) {
+async function hunyuanSpace(space, blob, opts, progress) {
+  const HF_SPACE = space.host;
   const token = cuentas.get("HF_TOKEN");
   const auth = token ? { Authorization: "Bearer " + token } : {};
-  progress(0.15, "Subiendo la imagen a Hunyuan3D-2 (Hugging Face)…");
+  progress(0.15, `Subiendo la imagen a ${space.name} (Hugging Face)…`);
   const form = new FormData();
   form.append("files", blob, "imagen.png");
   const up = await fetch(HF_SPACE + "/upload", { method: "POST", body: form, headers: auth });
@@ -74,12 +79,12 @@ async function runHunyuan(blob, opts, progress) {
     body: JSON.stringify({
       // mismo orden que /shape_generation: texto, imagen, 4 vistas, pasos, guía, semilla, resolución,
       // quitar fondo, chunks, semilla aleatoria
-      data: ["", { path, meta: { _type: "gradio.FileData" } }, null, null, null, null,
-        30, 5.0, opts.seed, opts.detail, true, 8000, false],
-      fn_index: 5, session_hash: session,
+      data: [...space.head, { path, meta: { _type: "gradio.FileData" } }, null, null, null, null,
+        50, 5.0, opts.seed, opts.detail, true, 200000, false],
+      fn_index: space.fn, session_hash: session,
     }),
   });
-  if (!join.ok) throw new Error("Hunyuan3D-2 no acepta la petición (HTTP " + join.status + ")");
+  if (!join.ok) throw new Error(space.name + " no acepta la petición (HTTP " + join.status + ")");
 
   const stream = await fetch(HF_SPACE + "/queue/data?session_hash=" + session, { headers: auth });
   let result = null, failure = null;
@@ -89,7 +94,7 @@ async function runHunyuan(blob, opts, progress) {
     } else if (m.msg === "process_starts") {
       progress(0.45, "Generando la forma 3D en la nube…");
     } else if (m.msg === "queue_full") {
-      failure = "La cola de Hunyuan3D-2 está llena; prueba en unos minutos"; return "stop";
+      failure = "La cola de " + space.name + " está llena; prueba en unos minutos"; return "stop";
     } else if (m.msg === "process_completed") {
       if (m.success === false || !m.output?.data) failure = m.output?.error || "error desconocido";
       else result = m.output.data[0];
@@ -98,7 +103,7 @@ async function runHunyuan(blob, opts, progress) {
   });
   if (failure) {
     if (/quota/i.test(failure)) {
-      throw new QuotaExceeded("Se ha acabado tu cuota gratuita de Hunyuan3D-2; se renueva con el tiempo." +
+      throw new QuotaExceeded("Se ha acabado tu cuota gratuita de Hugging Face (es de todos los Spaces de GPU); se renueva con el tiempo." +
         (token ? "" : " Inicia sesión con tu cuenta de Hugging Face en «Cuentas» para tener más.") +
         " También puedes probar con Meshy.");
     }
@@ -106,9 +111,19 @@ async function runHunyuan(blob, opts, progress) {
   }
   const file = result?.value ?? result;
   const url = file?.url || (file?.path ? HF_SPACE + "/file=" + file.path : null);
-  if (!url) throw new Error("Hunyuan3D-2 no devolvió ningún modelo");
+  if (!url) throw new Error(space.name + " no devolvió ningún modelo");
   progress(0.75, "Descargando el modelo…");
   return netBytes(url);
+}
+
+async function runHunyuan(blob, opts, progress) {
+  try {
+    return await hunyuanSpace(SPACES.hy21, blob, opts, progress);
+  } catch (e) {
+    if (e instanceof QuotaExceeded) throw e; // la cuota es común: la 2.0 tampoco funcionaría
+    progress(0.2, "Hunyuan3D-2.1 no responde; pruebo con Hunyuan3D-2…");
+    return hunyuanSpace(SPACES.hy2, blob, opts, progress);
+  }
 }
 
 // ------------------------------------------------------------ Meshy (nube, de pago)
@@ -163,8 +178,8 @@ async function runMeshy(blob, opts, progress) {
 }
 
 export const BACKENDS = [
-  { key: "hunyuan", label: "☁️ Hunyuan3D-2", tag: "recomendado",
-    description: "Gratis vía Hugging Face. Mejor forma para imprimir. ~20 s.", run: runHunyuan },
+  { key: "hunyuan", label: "☁️ Hunyuan3D-2.1", tag: "recomendado",
+    description: "Gratis vía Hugging Face (con cuenta tienes más cuota). Mejor forma para imprimir. ~40 s.", run: runHunyuan },
   { key: "meshy", label: "💎 Meshy", tag: "de pago",
     description: "Calidad profesional. Gasta créditos de tu cuenta de Meshy.", run: runMeshy },
 ];

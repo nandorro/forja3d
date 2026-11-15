@@ -5,7 +5,7 @@ import { BACKENDS, QuotaExceeded, cuentas, meshyBalance } from "./backends.js";
 import { prepareForPrint, toBinaryStl } from "./mesh.js";
 
 const $ = (id) => document.getElementById(id);
-let imageBlob = null, backendKey = "hunyuan", detail = 256, lastStl = null, busy = false;
+let imageBlob = null, backendKey = "hunyuan", detail = 320, smooth = 8, lastStl = null, busy = false;
 
 // ---------------------------------------------------------------- Interfaz
 for (const b of BACKENDS) {
@@ -25,6 +25,12 @@ $("detail").onclick = (e) => {
   if (!v) return;
   detail = +v;
   [...$("detail").children].forEach((b) => b.classList.toggle("on", b === e.target));
+};
+$("smooth").onclick = (e) => {
+  const v = e.target.dataset?.v;
+  if (v === undefined) return;
+  smooth = +v;
+  [...$("smooth").children].forEach((b) => b.classList.toggle("on", b === e.target));
 };
 $("file").onchange = (e) => {
   const f = e.target.files[0];
@@ -136,7 +142,7 @@ $("generate").onclick = async () => {
     setProgress(0.85, "Reparando y preparando para imprimir…");
     await new Promise((r) => setTimeout(r, 30)); // deja pintar el progreso
     const raw = await parseGlb(glb);
-    const m = prepareForPrint(raw.positions, raw.indices, +$("height").value);
+    const m = prepareForPrint(raw.positions, raw.indices, +$("height").value, smooth);
     lastStl = { name: `modelo_${new Date().toISOString().replace(/\D/g, "").slice(0, 14)}.stl`, buffer: toBinaryStl(m.positions, m.indices) };
     $("result").hidden = false;
     showMesh(m);
